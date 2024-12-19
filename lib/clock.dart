@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ImageSlider extends StatefulWidget {
@@ -10,77 +12,106 @@ class ImageSlider extends StatefulWidget {
 }
 
 class _ImageSliderState extends State<ImageSlider> {
-  // รายการรูปภาพนาฬิกา
-  final List<String> _images = List.generate(
-    20,
-    (index) => 'assets/Clock/clock${index + 1}-removebg-preview.png',
-  );
-
-  final List<String> innerNumbers = [
-    "๔",
-    "๗",
-    "๑",
-    "๒",
-    "๔",
-    "๗",
-    "๗",
-    "๑",
-    "๖",
-    "๕",
-    "๕",
-    "๕",
-    "๓",
-    "๒",
-    "๔",
-    "๑",
-    "๖",
-    "๓",
-    "๖",
-    "๓",
-    "๒"
-  ];
   late SharedPreferences _prefs;
   int _currentIndex = 1;
   int _numberRotationIndex = 0;
   DateTime _currentTime = DateTime.now();
   Timer? _timer;
-
+  Timer? _refreshTimer;
+  Timer? _timeUpdateTimer;
+  List<String> _images = [];
+  List<String> innerNumbers = [];
+  int _rotationCounter = 0;
+  bool _isLoading = true;
+  bool _hasError = false;
+  Timer? _apiTimer;
   @override
   void initState() {
+    fetchData(); // ดึงข้อมูลจาก API ครั้งแรก
+    _startRefreshTimer(); // ตั้ง Timer สำหรับรีเฟรชข้อมูล API
+    _startCurrentTimeTimer(); // ตั้ง Timer สำหรับอัพเดทเวลาปัจจุบัน
+    _startNumberRotationTimer();
     super.initState();
-    _initializePreferences();
   }
 
-  Future<void> _initializePreferences() async {
-    _prefs = await SharedPreferences.getInstance();
-    bool _hasRotatedToday = false;
+  void _startNumberRotationTimer() {
+    DateTime now = DateTime.now();
+    DateTime nextRotationTime =
+        DateTime(now.year, now.month, now.day, 23, 56, 0);
 
-    setState(() {
-      _currentIndex = _prefs.getInt('currentIndex') ?? 0;
-      _numberRotationIndex = _prefs.getInt('numberRotationIndex') ?? 0;
-      // เพิ่มการดึง flag การสลับประจำวัน
-      _hasRotatedToday = _prefs.getBool('hasRotatedToday') ?? false;
-    });
+    if (now.isAfter(nextRotationTime)) {
+      nextRotationTime = nextRotationTime.add(Duration(days: 1));
+    }
 
-    _timer = Timer.periodic(Duration(seconds: 1), (timer) {
-      setState(() {
-        _currentTime = DateTime.now().toLocal();
-        if (_currentTime.hour == 23 &&
-            _currentTime.minute == 56 &&
-            !_hasRotatedToday) {
-          _rotateImage();
-          _rotateNumbers();
+    Duration initialDelay = nextRotationTime.difference(now);
 
-          _hasRotatedToday = true;
-          _prefs.setBool('hasRotatedToday', true);
-        }
+    Timer(initialDelay, () {
+      if (mounted) {
+        setState(() {
+          _numberRotationIndex =
+              (_numberRotationIndex + 1) % innerNumbers.length;
+        });
+      }
 
-        if (_currentTime.hour == 0 && _currentTime.minute == 0) {
-          _hasRotatedToday = false;
-          _prefs.setBool('hasRotatedToday', false);
+      _timer = Timer.periodic(Duration(minutes: 1360), (timer) {
+        if (mounted) {
+          setState(() {
+            _numberRotationIndex =
+                (_numberRotationIndex + 1) % innerNumbers.length;
+          });
         }
       });
     });
+  }
+
+  void _startRealtimeUpdates() {
+    // เรียก API ทุก 30 วินาที
+    _apiTimer = Timer.periodic(Duration(seconds: 30), (timer) {
+      fetchData();
+    });
+  }
+
+  /// ฟังก์ชันดึงข้อมูลจาก API
+  Future<void> fetchData() async {
+    try {
+      // final url = Uri.parse('https://clock-api-wu4f.onrender.com/clock-data');
+      https: //clock-api-production-ef71.up.railway.app/clock-data
+      final url = Uri.parse(
+          'https://clock-api-production-ef71.up.railway.app/clock-data');
+      final response = await http.get(url);
+
+      if (response.statusCode == 200) {
+        var data = json.decode(response.body);
+
+        String? imagePath = data['image'];
+        if (imagePath != null && mounted) {
+          setState(() {
+            _images = [
+              'https://clock-api-production-ef71.up.railway.app/Clock/$imagePath'
+            ];
+            innerNumbers = List<String>.from(data['numbers']['current']);
+            _isLoading = false;
+            _hasError = false;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _hasError = true;
+            _isLoading = false;
+          });
+        }
+        print('API Error: ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _isLoading = false;
+        });
+      }
+      print('Network Error: $e');
+    }
   }
 
   double _calculateHandAngle(int value, int max) {
@@ -88,53 +119,48 @@ class _ImageSliderState extends State<ImageSlider> {
   }
 
   int _findCurrentNumberForHand(double handAngle, List<String> numbers) {
-    // คำนวณมุมเริ่มต้น (index แรก)
-    // ปรับองศาให้เริ่มจากตำแหน่งบนสุดของวงกลม
-    double startAngle = -pi / 1.5; // 12 นาฬิกา
+    // เพิ่มการเช็คก่อนคำนวณ
+    if (numbers.isEmpty) return 0;
 
-    // คำนวณมุมต่อเซ็กชัน
+    double startAngle = -pi / 1.5;
     double anglePerSection = (2 * pi) / numbers.length;
-
-    // ปรับมุมให้เป็นค่าบวก
     double normalizedAngle = (handAngle - startAngle + 2 * pi) % (2 * pi);
-
-    // คำนวณ index
     int index = (normalizedAngle / anglePerSection).floor();
-
     return index % numbers.length;
   }
-  // int _findCurrentNumberForHand(double handAngle, List<String> numbers) {
-  //   // เพิ่ม print เพื่อดูค่ามุมและการคำนวณ
-  //   print('Input Angle: $handAngle');
-  //   print('Total Numbers: ${numbers.length}');
 
-  //   // ปรับมุมให้อยู่ในช่วง 0 ถึง 2π
-  //   double normalizedAngle = (handAngle + pi) % (2 * pi);
-  //   print('Normalized Angle: $normalizedAngle');
+  void _startRefreshTimer() {
+    // คำนวณเวลาถึง 23:56
+    DateTime now = DateTime.now();
+    DateTime nextRefreshTime =
+        DateTime(now.year, now.month, now.day, 23, 56, 0);
 
-  //   // คำนวณมุมต่อช่วง
-  //   final anglePerSection = (2 * pi) / numbers.length;
-  //   print('Angle Per Section: $anglePerSection');
+    // ถ้าเวลาปัจจุบันเกิน 23:56 แล้ว ให้ไปยังวันถัดไป
+    if (now.isAfter(nextRefreshTime)) {
+      nextRefreshTime = nextRefreshTime.add(Duration(days: 1));
+    }
 
-  //   // คำนวณ index โดยละเอียด
-  //   int index = ((normalizedAngle) / anglePerSection).floor();
-  //   print('Calculated Index: $index');
+    // คำนวณเวลาที่ต้องรอ
+    Duration initialDelay = nextRefreshTime.difference(now);
 
-  //   return index % numbers.length;
-  // }
+    // ตั้ง Timer แรก
+    Timer(initialDelay, () {
+      fetchData(); // รีเฟรชข้อมูลครั้งแรก
 
-  void _rotateNumbers() {
-    setState(() {
-      _numberRotationIndex = (_numberRotationIndex + 1) % innerNumbers.length;
-      _prefs.setInt('numberRotationIndex', _numberRotationIndex);
+      // ตั้ง Timer วนซ้ำทุกๆ 1360 นาที
+      _refreshTimer = Timer.periodic(Duration(minutes: 1360), (timer) {
+        fetchData();
+      });
     });
   }
 
-  void _rotateImage() {
-    setState(() {
-      _currentIndex = (_currentIndex + 1) % _images.length;
-
-      _prefs.setInt('currentIndex', _currentIndex);
+  void _startCurrentTimeTimer() {
+    _timeUpdateTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          _currentTime = DateTime.now();
+        });
+      }
     });
   }
 
@@ -162,34 +188,80 @@ class _ImageSliderState extends State<ImageSlider> {
 
   @override
   void dispose() {
+    _apiTimer?.cancel(); // ยกเลิก Timer สำหรับเรียก API
+    _timeUpdateTimer?.cancel();
     _timer?.cancel();
     super.dispose();
   }
 
+  String _getBackgroundImage() {
+    final hour = _currentTime.hour;
+    if (hour >= 6 && hour <= 18) {
+      return 'assets/sky.jpg'; // Daytime image
+    } else {
+      return 'assets/night.jpg'; // Nighttime image
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final currentTime = DateTime.now();
-    final isNightTime = currentTime.hour >= 18 || currentTime.hour < 6;
-
     final secondAngle = _calculateHandAngle(_currentTime.second, 60);
     final minuteAngle = _calculateHandAngle(_currentTime.minute, 60);
     final hourAngle = _calculateHandAngle(
         (_currentTime.hour % 12) * 60 + _currentTime.minute, 12 * 60);
 
     final hourHandIndex = _findCurrentNumberForHand(hourAngle, innerNumbers);
-    final hourHandNumber = innerNumbers[hourHandIndex];
-
+    final hourHandNumber = innerNumbers.isNotEmpty
+        ? innerNumbers[hourHandIndex]
+        : ''; // ป้องกัน null error
     final minuteHandIndex =
         _findCurrentNumberForHand(minuteAngle, innerNumbers);
-
-    final minuteHandNumber = innerNumbers[minuteHandIndex];
-    print('==== Hand Details ====');
-    print('Current Time: ${_currentTime}');
-    print('Second Angle: $secondAngle, Index: $hourHandIndex');
-    print('Minute Angle: $minuteAngle, Index: $minuteHandIndex');
-    print('Hour Angle: $hourAngle');
-    print('=====================');
-    _findCurrentNumberForHand(minuteAngle, innerNumbers);
+    final minuteHandNumber =
+        innerNumbers.isNotEmpty ? innerNumbers[minuteHandIndex] : '';
+    print('เข็มชั่วโมงชี้เลข: $hourHandNumber');
+    print('เข็มนาทีชี้เลข: $minuteHandNumber');
+    if (_isLoading) {
+      return Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 20),
+              Text(
+                'กำลังโหลดข้อมูล...',
+                style: TextStyle(fontSize: 18),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_hasError) {
+      return Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.error_outline,
+                color: Colors.red,
+                size: 60,
+              ),
+              SizedBox(height: 20),
+              Text(
+                'ไม่สามารถโหลดข้อมูลได้',
+                style: TextStyle(fontSize: 18, color: Colors.red),
+              ),
+              ElevatedButton(
+                onPressed: fetchData,
+                child: Text('ลองอีกครั้ง'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Scaffold(
       body: Center(
         child: Column(
@@ -198,38 +270,47 @@ class _ImageSliderState extends State<ImageSlider> {
             Stack(
               alignment: Alignment.center,
               children: [
-                Image.asset(isNightTime ? 'assets/night.jpg' : 'assets/sky.jpg',
-                    width: 520, height: 600, fit: BoxFit.cover),
+                Image.asset(_getBackgroundImage(),
+                    width: 580, height: 740, fit: BoxFit.cover),
                 Positioned(
-                  top: 150,
+                  top: 220,
                   left: 0,
                   right: 0,
-                  child: Image.asset(
-                    _images[_currentIndex],
-                    width: 350,
-                    height: 350,
-                    fit: BoxFit.contain,
-                  ),
+                  child: _images.isNotEmpty
+                      ? Image.network(
+                          _images.first,
+                          width: 350,
+                          height: 350,
+                          fit: BoxFit.contain,
+                          loadingBuilder: (context, child, loadingProgress) {
+                            if (loadingProgress == null) return child;
+                            return CircularProgressIndicator();
+                          },
+                          errorBuilder: (context, error, stackTrace) {
+                            print('Error loading image: $error');
+                            return Text('โหลดรูปภาพล้มเหลว');
+                          },
+                        )
+                      : CircularProgressIndicator(),
                 ),
                 _buildArrowHand(
                   angle: secondAngle,
                   color: Colors.red,
-                  length: 150, // ลดลงนิดหน่อย
+                  length: 150,
                   thickness: 2,
-                  // เพิ่มการชดเชยตำแหน่ง
                   offset: Offset(0, 10),
                 ),
                 _buildArrowHand(
                   angle: minuteAngle,
                   color: Colors.blue,
-                  length: 130, // ลดลงนิดหน่อย
+                  length: 130,
                   thickness: 4,
                   offset: Offset(0, 15),
                 ),
                 _buildArrowHand(
                   angle: hourAngle,
                   color: Colors.black,
-                  length: 95, // ลดลงนิดหน่อย
+                  length: 95,
                   thickness: 6,
                   offset: Offset(0, 20),
                 ),
@@ -243,7 +324,6 @@ class _ImageSliderState extends State<ImageSlider> {
                         size: Size(300, 300),
                         painter: DividerLinePainter(radius: 140),
                       ),
-                      // วงกลางตรงกลาง
                       Positioned(
                         left: 140,
                         top: 158,
@@ -256,8 +336,6 @@ class _ImageSliderState extends State<ImageSlider> {
                           ),
                         ),
                       ),
-
-                      // ตัวเลข
                       ...List.generate(innerNumbers.length, (index) {
                         final adjustedIndex = (index + _numberRotationIndex) %
                             innerNumbers.length;
@@ -286,14 +364,6 @@ class _ImageSliderState extends State<ImageSlider> {
               ],
             ),
             SizedBox(height: 30),
-            // Text(
-            //   'เข็มชั่วโมง: $hourHandNumber',
-            //   style: TextStyle(fontSize: 16),
-            // ),
-            // Text(
-            //   'เข็มนาที: $minuteHandNumber',
-            //   style: TextStyle(fontSize: 16),
-            // ),
             Text(
               'เวลาปัจจุบัน: ${_currentTime.hour.toString().padLeft(2, '0')}:${_currentTime.minute.toString().padLeft(2, '0')}:${_currentTime.second.toString().padLeft(2, '0')}',
               style: TextStyle(fontSize: 18),
